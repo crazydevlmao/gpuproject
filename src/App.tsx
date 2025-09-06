@@ -1,0 +1,819 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
+
+// ========================= THEME =========================
+const GREEN = "#59d696";
+const BG = "#0e0f11";
+const CARD = "#17191d";
+const GRID = "#1f232a";
+
+// ========================= PROTOCOL CONSTANTS =========================
+const TOKENS_PER_GPU = 1_000_000;
+const MAX_GPUS = 1000; // reserved for future logic (caps, gauges, etc.)
+
+// ========================= HELIUS CONFIG =========================
+//const HELIUS_API_KEY = "327f04c4-f994-4093-996a-37c2a89462a0";
+const TRACKED_MINT = "HUz9dMkUd1TiDzpm9nwkiQDUgUp9gazuVF59DyAjpump";
+//const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+
+// Wallet that displays the mined SOL total (center "GPU Rewards")
+const SOL_WALLET = "85rjKGRFu9emw1Jyue3BfuJd3m8mqbhZQKrK7Gwfk7Jq";
+// Wallet that aggregates epoch rewards (right "Epoch Rewards")
+const EPOCH_REWARDS_WALLET = "Ch8xxccjR5iYVwDrNmFdCt3tSX4VaVKfjAqMsoMNRmfv";
+
+// ========================= EXCLUSIONS (EDIT HERE ON DEPLOY) =========================
+export const PUMPFUN_AMM_WALLET = "GXz5QGRpugxBZ7V9S9YiJ27K5Zt7TqizqvrjZRVegeU5"; // replace on deploy
+const EXCLUDED_HOLDERS = new Set<string>([PUMPFUN_AMM_WALLET]);
+export const isExcludedHolder = (addr: string) => EXCLUDED_HOLDERS.has(addr);
+
+// ========================= SHARED HELPERS =========================
+const nf = new Intl.NumberFormat("en-US");
+export const toGPUs = (balance: number) => Math.floor(balance / TOKENS_PER_GPU);
+export function normalizeMint(input: string): string {
+  const match = input.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/);
+  return match ? match[0] : input;
+}
+
+// Robust JSON-RPC POST to Helius. Throws with clear context on parse/HTTP errors.
+const QUIET_RPC_LOGS = true; // set false to see warnings in console during dev
+let _gpaWarnedOnce = false; // avoid noisy repeats in production
+
+async function heliusRpc(method: string, params: any[]) {
+  const body = JSON.stringify({ jsonrpc: "2.0", id: method, method, params });
+  const res = await fetch(HELIUS_RPC, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  });
+  const text = await res.text();
+  let json: any;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch (e) {
+    throw new Error(`RPC parse error (${res.status}): ${text.slice(0, 120)}`);
+  }
+  if (!res.ok) {
+    const msg = json?.error?.message ?? `HTTP ${res.status}`;
+    throw new Error(`RPC HTTP error: ${msg}`);
+  }
+  if (json?.error) throw new Error(json.error?.message || "RPC error");
+  return json;
+}
+
+function isTransientRpcError(err: any) {
+  const m = String(err?.message || err);
+  return /(429|500|502|503|504|timeout|NetworkError|fetch failed)/i.test(m);
+}
+
+async function retry<T>(fn: () => Promise<T>, maxRetries = 1, delayMs = 600): Promise<T> {
+  let lastErr: any;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i === maxRetries || !isTransientRpcError(e)) break;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
+function parseLamportsFromGetBalance(payload: any): number {
+  // Some providers return {result: {value: lamports}}, others {result: lamports}
+  const lamports = Number(payload?.result?.value ?? payload?.result ?? 0);
+  return Number.isFinite(lamports) ? lamports : 0;
+}
+
+async function fetchWalletSol(address: string): Promise<number> {
+  try {
+    const json = await heliusRpc("getBalance", [address]);
+    const lamports = parseLamportsFromGetBalance(json);
+    return lamports / 1e9;
+  } catch (e) {
+    console.error("getBalance error", e);
+    return 0; // fail-safe: do not break UI
+  }
+}
+
+async function fetchSolBalance(): Promise<number> {
+  return fetchWalletSol(SOL_WALLET);
+}
+
+async function fetchEpochRewardsBalance(): Promise<number> {
+  return fetchWalletSol(EPOCH_REWARDS_WALLET);
+}
+
+// ========================= COMPONENTS =========================
+// ========================= HEADER (with X link) =========================
+function Header() {
+  return (
+    <div className="w-full grid grid-cols-[1fr_auto_1fr] items-center py-5">
+      {/* Left: GPU title */}
+      <div className="flex items-center gap-3">
+        <div
+          className="text-sm tracking-[0.3em] uppercase select-none"
+          style={{ color: GREEN, textShadow: `0 0 8px ${GREEN}aa, 0 0 18px ${GREEN}55` }}
+        >
+          GPU
+        </div>
+      </div>
+
+      {/* Center: X (Twitter) link */}
+      <a
+        href="https://x.com/"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="justify-self-center group inline-flex items-center"
+        aria-label="Open X (Twitter)"
+        title="Open X (Twitter)"
+      >
+        <span
+          className="inline-flex h-8 w-8 items-center justify-center rounded-xl border transition-transform group-hover:scale-105"
+          style={{
+            background: CARD,
+            borderColor: GRID,
+            color: "#e5e7eb",
+            boxShadow: `0 0 8px ${GREEN}44`,
+          }}
+        >
+          <span
+            className="text-sm font-semibold leading-none"
+            style={{ textShadow: `0 0 6px ${GREEN}55` }}
+          >
+            X
+          </span>
+        </span>
+      </a>
+
+      {/* Right: status pill */}
+      <div className="flex items-center gap-2 justify-self-end text-xs text-gray-300">
+        <div className="relative h-3 w-3">
+          <span className="absolute inset-0 rounded-full" style={{ background: GREEN, opacity: 0.25 }} />
+          <span className="absolute inset-0 rounded-full animate-ping" style={{ background: GREEN, opacity: 0.5 }} />
+          <span className="absolute inset-0 rounded-full" style={{ background: GREEN }} />
+        </div>
+        <span className="opacity-80">All systems operational</span>
+      </div>
+    </div>
+  );
+}
+
+
+// Info cards carousel (kept centered)
+function InfoCarousel() {
+  const cards = [
+    { t: "Mining rewards every 1800s", s: "Snapshot + distribution cycle." },
+    { t: "1 GPU = 1,000,000 $GPU", s: "Hard cap: 1,000 GPUs circulating." },
+    { t: "Direct deposit into your wallet", s: "No claiming process. Mining rewards sent to your GPUs." },
+    { t: "100% of creator rewards", s: "100% of creator rewards are distributed to miners." },
+  ];
+
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setIdx((x) => (x + 1) % cards.length), 4000);
+    return () => clearInterval(id);
+  }, [cards.length]);
+
+  return (
+    <div className="w-full flex justify-center mt-6">
+      <div className="relative flex items-center justify-center">
+        {/* Neon baseline behind cards */}
+        <div className="pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 z-0">
+          <div
+            className="h-[2px] w-full rounded-full"
+            style={{ background: GREEN + "55", boxShadow: `0 0 10px ${GREEN}77, 0 0 24px ${GREEN}44` }}
+          />
+          <motion.div
+            className="absolute top-1/2 -translate-y-1/2 h-[4px] rounded-full"
+            style={{
+              width: 140,
+              background: `linear-gradient(90deg, transparent 0%, ${GREEN} 50%, transparent 100%)`,
+              filter: "blur(0.5px)",
+              boxShadow: `0 0 18px ${GREEN}, 0 0 30px ${GREEN}`,
+            }}
+            animate={{ left: ["-140px", "calc(100% - 140px)"] }}
+            transition={{ duration: 6.15, repeat: Infinity, ease: "linear" }}
+          />
+          {/* second bar for seamless looping */}
+          <motion.div
+            className="absolute top-1/2 -translate-y-1/2 h-[4px] rounded-full"
+            style={{
+              width: 140,
+              background: `linear-gradient(90deg, transparent 0%, ${GREEN} 50%, transparent 100%)`,
+              filter: "blur(0.5px)",
+              boxShadow: `0 0 18px ${GREEN}, 0 0 30px ${GREEN}`,
+            }}
+            animate={{ left: ["-140px", "calc(100% - 140px)"] }}
+            transition={{ duration: 6.15, repeat: Infinity, ease: "linear", delay: 3.075 }}
+          />
+        </div>
+
+        {/* Cards row */}
+        <div className="relative z-10 flex gap-6 items-center">
+          {cards.map((card, i) => {
+            const active = i === idx;
+            return (
+              <motion.div
+                key={i}
+                className="relative px-5 py-4 rounded-2xl shadow-md max-w-[360px]"
+                style={{ background: CARD, border: `1px solid ${GRID}`, filter: active ? "none" : "brightness(0.85) saturate(0.9)" }}
+                animate={{ scale: active ? 1.05 : 0.95 }}
+                transition={{ duration: 0.5 }}
+              >
+                {i === cards.length - 1 && (
+                  <span className="absolute top-2 right-2 group inline-flex items-center justify-center w-4 h-4 rounded-full border border-gray-600 text-[10px] text-gray-300 select-none">
+                    i
+                    <span className="absolute z-20 hidden group-hover:block -top-2 right-5 whitespace-normal text-[11px] leading-snug bg-[#111318] border border-[#2a2f38] rounded-md px-2 py-1 text-gray-200 shadow-xl w-72">
+                      65% of the creator rewards will be allocated to GPU miners at the time of each snapshot. 35% of the creator rewards will be allocated to miners that have been active for 12+ hours without interruption at the time of each epoch cycle reward.
+                    </span>
+                  </span>
+                )}
+                <div className="text-sm font-semibold whitespace-nowrap overflow-hidden text-ellipsis" style={{ color: GREEN }}>
+                  {card.t}
+                </div>
+                <div className="text-xs text-gray-300/85 mt-1 leading-relaxed">{card.s}</div>
+              </motion.div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Props interface to avoid inline parameter type annotations in environments that transpile as JS
+interface GPUsWorkingProps {
+  holders: { address: string; balance: number }[];
+  sol: number | null; // GPU Rewards (center)
+  epochSol: number | null; // Epoch Rewards (right)
+}
+
+function GPUsWorking({ holders, sol, epochSol }: GPUsWorkingProps) {
+  const totalGPUs = useMemo(() => holders.reduce((acc, h) => acc + toGPUs(h.balance), 0), [holders]);
+
+  return (
+    <div className="mt-6 relative grid grid-cols-1 md:grid-cols-3 gap-6 md:items-center">
+      {/* vertical glow separators */}
+      <motion.div
+        className="hidden md:block pointer-events-none absolute top-0 bottom-0"
+        style={{ left: "33.333%", transform: "translateX(-50%)", width: 2, background: `linear-gradient(180deg, transparent, ${GREEN}, transparent)`, boxShadow: `0 0 12px ${GREEN}AA, 0 0 24px ${GREEN}66` }}
+        animate={{ opacity: [0.5, 1, 0.5] }}
+        transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut" }}
+      />
+      <motion.div
+        className="hidden md:block pointer-events-none absolute top-0 bottom-0"
+        style={{ left: "66.666%", transform: "translateX(-50%)", width: 2, background: `linear-gradient(180deg, transparent, ${GREEN}, transparent)`, boxShadow: `0 0 12px ${GREEN}AA, 0 0 24px ${GREEN}66` }}
+        animate={{ opacity: [0.5, 1, 0.5] }}
+        transition={{ duration: 3.2, repeat: Infinity, ease: "easeInOut", delay: 1.6 }}
+      />
+
+      {/* Left: GPUs working */}
+      <div className="flex items-center gap-3 order-1 md:order-1">
+        <div className="text-base md:text-lg tracking-wide text-gray-200/90">GPUs working:</div>
+        <div className="text-xl md:text-2xl font-semibold" style={{ color: GREEN, textShadow: `0 0 10px ${GREEN}77` }}>
+          {nf.format(totalGPUs)}
+        </div>
+      </div>
+
+      {/* Middle: GPU Rewards (formerly SOL mined) */}
+      <div className="relative flex items-center justify-start md:justify-center gap-3 order-2 md:order-2">
+        <div className="text-base md:text-lg tracking-wide text-gray-200/90">GPU Rewards:</div>
+        <div className="text-xl md:text-2xl font-semibold" style={{ color: GREEN, textShadow: `0 0 10px ${GREEN}77` }}>
+          {sol === null ? "—" : (
+            <span className="inline-flex items-center gap-1">
+              <span>{sol.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SOL</span>
+              <span className="relative group inline-flex items-center justify-center w-4 h-4 rounded-full border border-gray-600 text-[10px] text-gray-300 ml-1">i
+                <span className="absolute z-20 hidden group-hover:block -top-2 left-5 whitespace-normal text-[11px] leading-snug bg-[#111318] border border-[#2a2f38] rounded-md px-2 py-1 text-gray-200 shadow-xl w-64">
+                  Total creator rewards already claimed that will be distributed to GPUs in the next reward cycle.
+                </span>
+              </span>
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Right: Epoch Rewards */}
+      <div className="relative flex items-center gap-3 justify-start md:justify-end order-3 md:order-3">
+        <div className="text-base md:text-lg tracking-wide text-gray-200/90">Epoch Rewards:</div>
+        <div className="text-xl md:text-2xl font-semibold" style={{ color: GREEN, textShadow: `0 0 10px ${GREEN}77` }}>
+          {epochSol === null ? "—" : (
+            <span className="inline-flex items-center gap-1">
+              <span>{epochSol.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} SOL</span>
+              <span className="relative group inline-flex items-center justify-center w-4 h-4 rounded-full border border-gray-600 text-[10px] text-gray-300 ml-1">i
+                <span className="absolute z-20 hidden group-hover:block -top-2 right-5 whitespace-normal text-[11px] leading-snug bg-[#111318] border border-[#2a2f38] rounded-md px-2 py-1 text-gray-200 shadow-xl w-72">
+                  Creator rewards (35%) allocated to the next epoch cycle for miners active 12+ hours without interruption.
+                </span>
+              </span>
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ========================= COUNTDOWN =========================
+function msUntilNextThirty(): number {
+  const now = new Date();
+  const next = new Date(now);
+  next.setSeconds(0, 0);
+  next.setMinutes(now.getMinutes() < 30 ? 30 : 60);
+  return next.getTime() - now.getTime();
+}
+function useHalfHourCountdown() {
+  const [remaining, setRemaining] = useState<number>(() => msUntilNextThirty());
+  useEffect(() => {
+    const id = setInterval(() => setRemaining((r) => (r - 1000 <= 0 ? msUntilNextThirty() : r - 1000)), 1000);
+    const onVis = () => setRemaining(msUntilNextThirty());
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
+  const total = 30 * 60 * 1000;
+  const elapsed = Math.max(0, total - remaining);
+  const mm = Math.floor(remaining / 60000);
+  const ss = Math.floor((remaining % 60000) / 1000);
+  return { display: `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`, progress: elapsed / total };
+}
+function CountdownBar() {
+  const { display, progress } = useHalfHourCountdown();
+  return (
+    <div className="mt-4 w-full">
+      <div className="flex items-center justify-between text-xs text-gray-400">
+        <span>Next reward cycle</span>
+        <span className="font-mono text-gray-200">{display}</span>
+      </div>
+      <div className="mt-2 h-2 w-full rounded-full overflow-hidden" style={{ background: GRID }}>
+        <motion.div className="h-full" style={{ background: GREEN }} animate={{ width: `${Math.min(100, Math.max(0, progress * 100)).toFixed(2)}%` }} transition={{ type: "tween", ease: "linear", duration: 0.9 }} />
+      </div>
+    </div>
+  );
+}
+
+// Epoch countdown (time until next Solana epoch)
+function formatHMS(ms: number) {
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function useEpochCountdownFromServer(initial?: { totalMs: number; remainingMs: number }) {
+  const [state, setState] = useState<{ totalMs: number; remainingMs: number }>(
+    initial ?? { totalMs: 0, remainingMs: 0 }
+  );
+
+  // when server snapshot updates (every 30s), reset the timer
+  useEffect(() => {
+    if (!initial) return;
+    setState(initial);
+  }, [initial?.totalMs, initial?.remainingMs]);
+
+  // tick locally every second
+  useEffect(() => {
+    if (!state.totalMs) return;
+    const id = setInterval(() => {
+      setState((s) => ({ ...s, remainingMs: Math.max(0, s.remainingMs - 1000) }));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [state.totalMs]);
+
+  const progress = state.totalMs ? (state.totalMs - state.remainingMs) / state.totalMs : 0;
+  const display = formatHMS(state.remainingMs);
+  return { display, progress };
+}
+
+function EpochCountdownBar({ epoch }: { epoch: { totalMs: number; remainingMs: number } | null }) {
+  const { display, progress } = useEpochCountdownFromServer(epoch ?? undefined);
+  return (
+    <div className="mt-3 w-full">
+      <div className="flex items-center justify-between text-xs text-gray-400">
+        <span className="flex items-center gap-2">
+          Next epoch cycle
+          <span className="relative group inline-flex items-center justify-center w-4 h-4 rounded-full border border-gray-600 text-[10px] text-gray-300">i
+            <span className="absolute z-20 hidden group-hover:block -top-2 left-5 whitespace-normal text-[11px] leading-snug bg-[#111318] border border-[#2a2f38] rounded-md px-2 py-1 text-gray-200 shadow-xl w-64">
+              Each GPU that has been working for over 12 hours without interruption during the current epoch receives a share of the epoch reward.
+            </span>
+          </span>
+        </span>
+        <span className="font-mono text-gray-200">{display}</span>
+      </div>
+      <div className="mt-2 h-2 w-full rounded-full overflow-hidden" style={{ background: GRID }}>
+        <motion.div className="h-full" style={{ background: GREEN }} animate={{ width: `${Math.min(100, Math.max(0, progress * 100)).toFixed(2)}%` }} transition={{ type: "tween", ease: "linear", duration: 0.9 }} />
+      </div>
+    </div>
+  );
+}
+
+// ========================= TABLE =========================
+function HoldersTable({ holders }: { holders: { address: string; balance: number }[] }) {
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize] = useState(25); // locked to 25 per your requirement
+
+  const processed = useMemo(() => holders.map((h) => ({ address: String(h.address), balance: Number(h.balance), gpus: toGPUs(Number(h.balance)) })), [holders]);
+
+  // build stable ranks from the full, sorted list (by balance desc), once
+  const ranks = useMemo(() => {
+    const sorted = [...processed].sort((a, b) => b.balance - a.balance);
+    const m = new Map<string, number>();
+    sorted.forEach((h, idx) => m.set(h.address, idx + 1));
+    return m;
+  }, [processed]);
+
+  const filtered = useMemo(() => processed.filter((h) => (query ? h.address.toLowerCase().includes(query.toLowerCase()) : true)), [processed, query]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const start = (currentPage - 1) * pageSize;
+  const pageRows = filtered.slice(start, start + pageSize);
+
+  // podium styling for top 3 ranks (gold, silver, bronze)
+  const podiumStyle = (rank: number) => {
+    switch (rank) {
+      case 1:
+        return { background: "linear-gradient(90deg, rgba(255,215,0,0) 0, rgba(255,215,0,0) 16px, rgba(255,215,0,0.12) 40px, rgba(255,215,0,0.05) calc(100% - 40px), rgba(255,215,0,0) calc(100% - 16px), rgba(255,215,0,0) 100%)", boxShadow: "none" } as React.CSSProperties;
+      case 2:
+        return { background: "linear-gradient(90deg, rgba(192,192,192,0) 0, rgba(192,192,192,0) 16px, rgba(192,192,192,0.12) 40px, rgba(192,192,192,0.05) calc(100% - 40px), rgba(192,192,192,0) calc(100% - 16px), rgba(192,192,192,0) 100%)", boxShadow: "none" } as React.CSSProperties;
+      case 3:
+        return { background: "linear-gradient(90deg, rgba(205,127,50,0) 0, rgba(205,127,50,0) 16px, rgba(205,127,50,0.12) 40px, rgba(205,127,50,0.05) calc(100% - 40px), rgba(205,127,50,0) calc(100% - 16px), rgba(205,127,50,0) 100%)", boxShadow: "none" } as React.CSSProperties;
+      default:
+        return {} as React.CSSProperties;
+    }
+  };
+
+  // text color for podium ranks
+  const medalColor = (rank: number) => (rank === 1 ? "#ffd700" : rank === 2 ? "#c0c0c0" : rank === 3 ? "#cd7f32" : "");
+
+  return (
+    <div className="mt-8 p-5 rounded-2xl relative overflow-hidden" style={{ background: CARD, border: `1px solid ${GRID}` }}>
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+        <div>
+          <div className="text-sm text-gray-300/90">Holder registry</div>
+          <div className="text-xs text-gray-400/90">1 GPU = {nf.format(TOKENS_PER_GPU)} $GPU</div>
+        </div>
+        <input
+          value={query}
+          onChange={(e) => {
+            setPage(1);
+            setQuery(e.target.value);
+          }}
+          placeholder="Search wallet…"
+          className="w-full md:w-72 px-3 py-2 rounded-xl outline-none text-sm"
+          style={{ background: "#121418", border: `1px solid ${GRID}`, color: "#e5e7eb" }}
+        />
+      </div>
+      <div className="mt-4 w-full overflow-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-gray-400">
+              <th className="py-2 pr-4">#</th>
+              <th className="py-2 pr-4">Wallet</th>
+              <th className="py-2 pr-4">Balance</th>
+              <th className="py-2 pr-4">GPUs</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageRows.map((h, i) => {
+              const rank = ranks.get(h.address) ?? (start + i + 1);
+              const rowStyle = podiumStyle(rank);
+              return (
+                <tr key={`${h.address}-${i}`} className="border-t border-[#232831] hover:bg-[#14171d] transition-colors" style={rowStyle}>
+                  <td className="py-3 pr-4 relative" style={{ isolation: "isolate" }}>
+                    {(() => {
+                      const mc = medalColor(rank);
+                      if (!mc) return <span className="text-gray-400">{rank}</span>;
+                      return (
+                        <span
+                          className="relative z-10 inline-block px-2 py-0.5 rounded-full font-semibold"
+                          style={{
+                            color: mc,
+                            background: "#0e0f11",
+                            opacity: 1,
+                            mixBlendMode: "normal",
+                            position: "relative",
+                            zIndex: 2,
+                            filter: `drop-shadow(0 0 6px ${mc}66)`,
+                            border: `1px solid ${mc}88`,
+                          }}
+                        >
+                          {rank}
+                        </span>
+                      );
+                    })()}
+                  </td>
+                  <td className="py-3 pr-4 font-mono text-gray-200 break-all">{h.address}</td>
+                  <td className="py-3 pr-4 text-gray-300">{nf.format(Math.floor(h.balance))}</td>
+                  <td className="py-3 pr-4 font-semibold" style={{ color: GREEN }}>
+                    {nf.format(h.gpus)}
+                  </td>
+                </tr>
+              );
+            })}
+            {pageRows.length === 0 && (
+              <tr>
+                <td colSpan={4} className="py-6 text-center text-xs text-gray-400">
+                  No holders found.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-4 flex items-center justify-between text-xs text-gray-400">
+        <span>
+          Page {currentPage} of {totalPages}
+        </span>
+        <div className="flex gap-2">
+          <button
+            disabled={currentPage === 1}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            className="px-3 py-1 rounded bg-[#121418] disabled:opacity-30"
+            style={{ border: `1px solid ${GRID}` }}
+          >
+            Prev
+          </button>
+          <button
+            disabled={currentPage === totalPages}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            className="px-3 py-1 rounded bg-[#121418] disabled:opacity-30"
+            style={{ border: `1px solid ${GRID}` }}
+          >
+            Next
+          </button>
+        </div>
+      </div>
+      {/* container fades to clean up any highlight edges against the container */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-6" style={{ background: `linear-gradient(180deg, ${CARD}, transparent)` }} />
+      <div className="pointer-events-none absolute inset-y-0 right-0 w-10" style={{ background: `linear-gradient(90deg, transparent, ${CARD})` }} />
+    </div>
+  );
+}
+
+// ========================= DATA LAYER =========================
+function coerceGPAList(json: any): any[] {
+  // Helius/Solana can return either an array directly in result, or an object with a `value` array
+  if (Array.isArray(json?.result)) return json.result as any[];
+  if (Array.isArray(json?.result?.value)) return json.result.value as any[];
+  return [];
+}
+
+async function fetchAllHolders(): Promise<{ address: string; balance: number }[]> {
+  try {
+    const normMint = normalizeMint(TRACKED_MINT);
+
+    const fetchByProgram = async (programId: string, withDataSize: boolean) => {
+      try {
+        const filters: any[] = [{ memcmp: { offset: 0, bytes: normMint } }];
+        // Legacy SPL token accounts have fixed size 165; Token-2022 varies with extensions
+        if (withDataSize) filters.unshift({ dataSize: 165 });
+
+        const json = await retry(() => heliusRpc("getProgramAccounts", [
+          programId,
+          { encoding: "jsonParsed", commitment: "confirmed", filters },
+        ]));
+
+        const list = coerceGPAList(json);
+        const out: Record<string, number> = {};
+        for (const item of list) {
+          const info = item?.account?.data?.parsed?.info;
+          const owner = info?.owner;
+          const amount = Number(info?.tokenAmount?.uiAmount ?? 0);
+          if (!owner || !Number.isFinite(amount) || amount <= 0) continue;
+          out[owner] = (out[owner] ?? 0) + amount;
+        }
+        return out;
+      } catch (e) {
+        if (!QUIET_RPC_LOGS && !_gpaWarnedOnce) { console.warn("getProgramAccounts warning", (e as any)?.message || e); _gpaWarnedOnce = true; }
+        return {};
+      }
+    };
+
+    const [legacyMap, t22Map] = await Promise.all([
+      fetchByProgram("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", true),
+      fetchByProgram("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCx2w6G3W", false),
+    ]);
+
+    const merged: Record<string, number> = {};
+    for (const m of [legacyMap, t22Map]) {
+      for (const [k, v] of Object.entries(m)) merged[k] = (merged[k] ?? 0) + (v as number);
+    }
+
+    let entries = Object.entries(merged).filter(([addr, bal]) => !isExcludedHolder(addr) && (bal ?? 0) > 0);
+
+    // Fallback path: largest accounts → owners via getMultipleAccounts
+    if (entries.length === 0) {
+      try {
+        const largest = await heliusRpc("getTokenLargestAccounts", [normMint, { commitment: "confirmed" }]);
+        const vals: any[] = Array.isArray(largest?.result?.value) ? largest.result.value : [];
+        const accounts = vals.map((row) => ({ address: row.address, balance: Number(row.uiAmount ?? 0) }));
+        const pubkeys = accounts.map((a) => a.address);
+        if (pubkeys.length) {
+          const multi = await heliusRpc("getMultipleAccounts", [
+            pubkeys,
+            { encoding: "jsonParsed", commitment: "confirmed" },
+          ]);
+          const infos: any[] = Array.isArray(multi?.result?.value) ? multi.result.value : [];
+          const fallbackMerged: Record<string, number> = {};
+          accounts.forEach((acc, i) => {
+            const owner = infos[i]?.data?.parsed?.info?.owner ?? null;
+            if (!owner) return;
+            fallbackMerged[owner] = (fallbackMerged[owner] ?? 0) + Number(acc.balance ?? 0);
+          });
+          entries = Object.entries(fallbackMerged).filter(([addr, b]) => !isExcludedHolder(addr) && (b ?? 0) > 0);
+        }
+      } catch (e) {
+        console.error("largest-accounts fallback error", e);
+      }
+    }
+
+    const result = entries
+      .map(([address, balance]) => ({ address, balance: Number(balance) }))
+      .sort((a, b) => b.balance - a.balance);
+
+    return result;
+  } catch (e) {
+    console.error("fetchAllHolders error", e);
+    return [];
+  }
+}
+
+// ========================= APP =========================
+export default function App() {
+  const [holders, setHolders] = useState<{ address: string; balance: number }[]>([]);
+  const [sol, setSol] = useState<number | null>(null);
+  const [epochSol, setEpochSol] = useState<number | null>(null);
+  const [epoch, setEpoch] = useState<{ totalMs: number; remainingMs: number } | null>(null);
+
+  useEffect(() => {
+    // global styles (fonts, bg, text color)
+    document.documentElement.style.background = BG;
+    document.documentElement.style.color = "#e5e7eb";
+    document.documentElement.style.fontFamily =
+      "";
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    // Browser ONLY reads the cached snapshot; it never talks to Helius
+    const load = async () => {
+      try {
+        const res = await fetch("/api/snapshot", { cache: "no-store" });
+        if (!mounted) return;
+        if (res.ok) {
+          const data = await res.json();
+          const h = Array.isArray(data?.holders)
+            ? data.holders.map((x: any) => ({ address: String(x.address), balance: Number(x.balance) }))
+            : [];
+          setHolders(h);
+          setSol(Number(data?.gpuRewardsSol ?? 0));
+          setEpochSol(Number(data?.epochRewardsSol ?? 0));
+          const e = data?.epoch;
+          if (e && Number.isFinite(e.totalMs) && Number.isFinite(e.remainingMs)) {
+            setEpoch({ totalMs: Number(e.totalMs), remainingMs: Number(e.remainingMs) });
+          }
+        }
+      } catch (e) {
+        // ignore errors; cache will refresh next cycle
+      }
+    };
+
+    const safeLoad = () => {
+      if (document.visibilityState !== "visible") return; // skip background tabs
+      load();
+    };
+
+    safeLoad(); // initial
+    const id = setInterval(safeLoad, 30_000); // refresh every 30s from server cache
+    const onVis = () => document.visibilityState === "visible" && safeLoad();
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      mounted = false;
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
+
+  return (
+    <div className="min-h-screen w-full" style={{ background: BG }}>
+      <link
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700&family=Rajdhani:wght@400;600;700&display=swap"
+        rel="stylesheet"
+      />
+      <div className="mx-auto max-w-6xl px-5 pb-24">
+        <Header />
+        <InfoCarousel />
+        <GPUsWorking holders={holders} sol={sol} epochSol={epochSol} />
+        <CountdownBar />
+        <EpochCountdownBar epoch={epoch} />
+        <HoldersTable holders={holders} />
+      </div>
+      <div
+        className="pointer-events-none fixed inset-0"
+        style={{
+          background:
+            "radial-gradient(1200px 600px at 50% -10%, rgba(89,214,150,0.08), transparent 60%), radial-gradient(800px 400px at 120% 10%, rgba(89,214,150,0.06), transparent 60%)",
+        }}
+      />
+    </div>
+  );
+}
+
+// ========================= DEV TESTS (lightweight) =========================
+function runDevTests() {
+  try {
+    console.groupCollapsed("GPU site – dev tests");
+
+    // toGPUs
+    console.assert(toGPUs(0) === 0, "toGPUs(0) should be 0");
+    console.assert(toGPUs(999_999) === 0, "toGPUs(999,999) should be 0");
+    console.assert(toGPUs(1_000_000) === 1, "toGPUs(1,000,000) should be 1");
+    console.assert(toGPUs(1_999_999) === 1, "toGPUs(1,999,999) should be 1");
+    console.assert(toGPUs(2_000_000) === 2, "toGPUs(2,000,000) should be 2");
+
+    // normalizeMint extracts base58
+    const mixed = `mint: ${TRACKED_MINT}`;
+    console.assert(
+      normalizeMint(mixed) === TRACKED_MINT.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/)![0],
+      "normalizeMint should extract base58 mint from mixed string"
+    );
+
+    // msUntilNextThirty bounds
+    const ms = msUntilNextThirty();
+    console.assert(ms > 0 && ms <= 30 * 60 * 1000, "msUntilNextThirty within 30 minutes");
+
+    // parseLamportsFromGetBalance shapes
+    console.assert(
+      parseLamportsFromGetBalance({ result: { value: 123 } }) === 123,
+      "parseLamports should read result.value"
+    );
+    console.assert(
+      parseLamportsFromGetBalance({ result: 456 }) === 456,
+      "parseLamports should read result"
+    );
+    // invalid shape returns 0 (defensive)
+    console.assert(
+      parseLamportsFromGetBalance({ foo: "bar" }) === 0,
+      "parseLamports should fallback to 0 on invalid payload"
+    );
+
+    // GPA result coercion
+    console.assert(Array.isArray(coerceGPAList({ result: [] })), "coerceGPAList handles direct array");
+    console.assert(Array.isArray(coerceGPAList({ result: { value: [] } })), "coerceGPAList handles result.value");
+
+    // merge logic sanity (two accounts same owner)
+    const mockList: any[] = [
+      { account: { data: { parsed: { info: { owner: "A", tokenAmount: { uiAmount: 1.5 } } } } } },
+      { account: { data: { parsed: { info: { owner: "A", tokenAmount: { uiAmount: 0.5 } } } } } },
+      { account: { data: { parsed: { info: { owner: "B", tokenAmount: { uiAmount: 2 } } } } } },
+    ];
+    const merged: Record<string, number> = {};
+    for (const item of mockList) {
+      const info = item?.account?.data?.parsed?.info;
+      const owner = info?.owner;
+      const amount = Number(info?.tokenAmount?.uiAmount ?? 0);
+      if (!owner || !Number.isFinite(amount) || amount <= 0) continue;
+      merged[owner] = (merged[owner] ?? 0) + amount;
+    }
+    console.assert(merged["A"] === 2, "merged A should equal 2");
+    console.assert(merged["B"] === 2, "merged B should equal 2");
+
+    // ranking stays stable when filtering (sanity)
+    const base = [
+      { address: "W1", balance: 300 },
+      { address: "W2", balance: 200 },
+      { address: "W3", balance: 100 },
+    ];
+    const sorted = [...base].sort((a, b) => b.balance - a.balance);
+    const rankMap = new Map<string, number>();
+    sorted.forEach((h, idx) => rankMap.set(h.address, idx + 1));
+    const filteredAddrs = base.filter((h) => h.address !== "W1").map((h) => h.address);
+    console.assert(
+      rankMap.get("W2") === 2 && rankMap.get("W3") === 3 && filteredAddrs.length === 2,
+      "rank map should reflect original positions after filter"
+    );
+
+    // exclusions
+    console.assert(isExcludedHolder("GXz5QGRpugxBZ7V9S9YiJ27K5Zt7TqizqvrjZRVegeU5") === true, "excluded wallet should be recognized");
+    console.assert(isExcludedHolder("11111111111111111111111111111111") === false, "non-excluded wallet should not be recognized");
+
+    // carousel active flag is boolean
+    const fakeIdx = 1;
+    const activeFlags = [0, 1, 2, 3].map((i) => i === fakeIdx);
+    console.assert(activeFlags.filter(Boolean).length === 1, "exactly one active card at a time");
+
+    console.groupEnd();
+  } catch (e) {
+    console.warn("Dev tests error", e);
+  }
+}
+if (typeof window !== "undefined") {
+  setTimeout(runDevTests, 0);
+}
