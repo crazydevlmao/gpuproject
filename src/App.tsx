@@ -9,7 +9,7 @@ const GRID = "#1f232a";
 
 // ========================= PROTOCOL CONSTANTS =========================
 const TOKENS_PER_GPU = 1_000_000;
-const TRACKED_MINT = "5EKFigDd1fhbGxq8hVTzBMcGhJZ1rKxL5aZtPuYqpump";
+const TRACKED_MINT = "7P3iw2mt6yc1HcqFFuAuLnLqVCm7KTYC11mHbUYopump";
 
 // ========================= EXCLUSIONS =========================
 export const PUMPFUN_AMM_WALLET = "GXz5QGRpugxBZ7V9S9YiJ27K5Zt7TqizqvrjZRVegeU5"; // replace on deploy
