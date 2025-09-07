@@ -8,7 +8,7 @@ if (!HELIUS_API_KEY) {
 }
 
 // === keep these in sync with your UI labels ===
-const TRACKED_MINT = "5EKFigDd1fhbGxq8hVTzBMcGhJZ1rKxL5aZtPuYqpump";
+const TRACKED_MINT = "7P3iw2mt6yc1HcqFFuAuLnLqVCm7KTYC11mHbUYopump";
 const SOL_WALLET = "85rjKGRFu9emw1Jyue3BfuJd3m8mqbhZQKrK7Gwfk7Jq";
 const EPOCH_REWARDS_WALLET = "Ch8xxccjR5iYVwDrNmFdCt3tSX4VaVKfjAqMsoMNRmfv";
 const PUMPFUN_AMM_WALLET = "GXz5QGRpugxBZ7V9S9YiJ27K5Zt7TqizqvrjZRVegeU5";
@@ -205,3 +205,4 @@ export default async function handler(req: Request) {
     });
   }
 }
+
