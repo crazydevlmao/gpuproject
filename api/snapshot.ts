@@ -4,7 +4,7 @@ export const config = { runtime: "edge" };
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY as string;
 
 // === keep these in sync with your UI ===
-const TRACKED_MINT = "HUz9dMkUd1TiDzpm9nwkiQDUgUp9gazuVF59DyAjpump";
+const TRACKED_MINT = "5EKFigDd1fhbGxq8hVTzBMcGhJZ1rKxL5aZtPuYqpump";
 const SOL_WALLET = "85rjKGRFu9emw1Jyue3BfuJd3m8mqbhZQKrK7Gwfk7Jq";
 const EPOCH_REWARDS_WALLET = "Ch8xxccjR5iYVwDrNmFdCt3tSX4VaVKfjAqMsoMNRmfv";
 const PUMPFUN_AMM_WALLET = "GXz5QGRpugxBZ7V9S9YiJ27K5Zt7TqizqvrjZRVegeU5";
@@ -172,3 +172,4 @@ export default async function handler() {
     return new Response(JSON.stringify({ error: e?.message || "snapshot failed" }), { status: 500 });
   }
 }
+
