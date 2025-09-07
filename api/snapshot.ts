@@ -1,5 +1,10 @@
 // api/snapshot.ts — Vercel Edge Function with retry/backoff + 60s CDN cache
-export const config = { runtime: "edge" };
+// api/snapshot.ts
+export const config = {
+  runtime: 'edge',
+  regions: ['iad1'], // pick ONE region (e.g. 'iad1' US-East)
+};
+
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY as string;
 if (!HELIUS_API_KEY) {
@@ -205,4 +210,5 @@ export default async function handler(req: Request) {
     });
   }
 }
+
 
