@@ -45,7 +45,7 @@ function Header() {
 
       {/* Center: X link */}
       <a
-        href="https://x.com/"
+        href="https://x.com/GPUcoinSOL/"
         target="_blank"
         rel="noopener noreferrer"
         className="justify-self-center group inline-flex items-center"
