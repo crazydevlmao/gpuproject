@@ -13,7 +13,6 @@ const TOKENS_PER_GPU = 1_000_000;
 
 const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 
-// --- helpers ---
 function normalizeMint(input: string): string {
   const m = input.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/);
   return m ? m[0] : input;
@@ -31,92 +30,85 @@ async function rpc(method: string, params: any[]) {
   return json;
 }
 
-function coerceGPAList(j: any): any[] {
-  if (Array.isArray(j?.result)) return j.result;
-  if (Array.isArray(j?.result?.value)) return j.result.value;
-  return [];
-}
-
 async function getBalanceSOL(pubkey: string): Promise<number> {
   const j = await rpc("getBalance", [pubkey]);
   const lamports = Number(j?.result?.value ?? j?.result ?? 0);
   return Number.isFinite(lamports) ? lamports / 1e9 : 0;
 }
 
-async function getHolders() {
-  const mint = normalizeMint(TRACKED_MINT);
+// ---- holders via robust 2-step approach ----
 
-  // 1) Try direct owner aggregation via getProgramAccounts (legacy + token22)
-  async function byProgram(programId: string, withDataSize: boolean) {
-    const filters: any[] = [{ memcmp: { offset: 0, bytes: mint } }];
-    if (withDataSize) filters.unshift({ dataSize: 165 }); // legacy SPL only
-    const j = await rpc("getProgramAccounts", [
-      programId,
-      { encoding: "jsonParsed", commitment: "confirmed", filters },
-    ]);
-    const list = coerceGPAList(j);
-    const out: Record<string, number> = {};
-    for (const it of list) {
-      const info = it?.account?.data?.parsed?.info;
+// 1) list token-account pubkeys via GPA (base64 + zero dataSlice)
+async function listTokenAccountPubkeys(programId: string, withDataSize: boolean, mint: string): Promise<string[]> {
+  const filters: any[] = [{ memcmp: { offset: 0, bytes: mint } }];
+  if (withDataSize) filters.unshift({ dataSize: 165 }); // legacy SPL token accounts only
+
+  const j = await rpc("getProgramAccounts", [
+    programId,
+    {
+      commitment: "confirmed",
+      encoding: "base64",
+      dataSlice: { offset: 0, length: 0 }, // only want pubkeys; no data payload
+      filters,
+    },
+  ]);
+
+  const arr: any[] = Array.isArray(j?.result) ? j.result : [];
+  return arr.map((it: any) => String(it?.pubkey)).filter(Boolean);
+}
+
+// 2) hydrate those pubkeys to get owners + uiAmount
+async function hydrateTokenOwners(pubkeys: string[]): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  const CHUNK = 100;
+  for (let i = 0; i < pubkeys.length; i += CHUNK) {
+    const slice = pubkeys.slice(i, i + CHUNK);
+    const j = await rpc("getMultipleAccounts", [slice, { encoding: "jsonParsed", commitment: "confirmed" }]);
+    const values: any[] = Array.isArray(j?.result?.value) ? j.result.value : [];
+    for (const v of values) {
+      const info = v?.data?.parsed?.info;
       const owner = info?.owner;
       const amt = Number(info?.tokenAmount?.uiAmount ?? 0);
       if (!owner || !(amt > 0)) continue;
       out[owner] = (out[owner] ?? 0) + amt;
     }
-    return out;
   }
+  return out;
+}
 
-  let merged: Record<string, number> = {};
+async function getHolders() {
+  const mint = normalizeMint(TRACKED_MINT);
+
+  // List candidate token accounts from both programs
+  let legacyKeys: string[] = [];
+  let t22Keys: string[] = [];
   try {
-    const [legacy, t22] = await Promise.all([
-      byProgram("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", true),
-      byProgram("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCx2w6G3W", false),
-    ]);
-    for (const m of [legacy, t22]) for (const [k, v] of Object.entries(m)) merged[k] = (merged[k] ?? 0) + (v as number);
+    legacyKeys = await listTokenAccountPubkeys("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", true, mint);
+  } catch {}
+  try {
+    t22Keys = await listTokenAccountPubkeys("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCx2w6G3W", false, mint);
+  } catch {}
+
+  const allKeys = [...new Set([...legacyKeys, ...t22Keys])];
+  if (allKeys.length === 0) return [];
+
+  // Hydrate owners / balances
+  let ownerMap: Record<string, number> = {};
+  try {
+    ownerMap = await hydrateTokenOwners(allKeys);
   } catch {
-    merged = {};
+    ownerMap = {};
   }
 
-  let entries = Object.entries(merged);
-
-  // 2) Fallback if empty: largest token accounts -> resolve owner pubkeys
-  if (entries.length === 0) {
-    try {
-      const largest = await rpc("getTokenLargestAccounts", [mint, { commitment: "confirmed" }]);
-      const vals: any[] = Array.isArray(largest?.result?.value) ? largest.result.value : [];
-      const accounts = vals
-        .map((row) => ({ address: row.address, amount: Number(row.uiAmount ?? 0) }))
-        .filter((r) => r.amount > 0);
-
-      const pubkeys = accounts.map((a) => a.address);
-      if (pubkeys.length) {
-        const multi = await rpc("getMultipleAccounts", [
-          pubkeys,
-          { encoding: "jsonParsed", commitment: "confirmed" },
-        ]);
-        const infos: any[] = Array.isArray(multi?.result?.value) ? multi.result.value : [];
-        const fallbackMerged: Record<string, number> = {};
-        accounts.forEach((acc, i) => {
-          const owner = infos[i]?.data?.parsed?.info?.owner ?? null;
-          if (!owner) return;
-          fallbackMerged[owner] = (fallbackMerged[owner] ?? 0) + acc.amount;
-        });
-        entries = Object.entries(fallbackMerged);
-      }
-    } catch {
-      // keep empty
-    }
-  }
-
-  const filtered = entries
+  const entries = Object.entries(ownerMap)
     .filter(([addr, bal]) => addr !== PUMPFUN_AMM_WALLET && (bal as number) > 0)
     .map(([address, balance]) => ({ address, balance: Number(balance) }))
     .sort((a, b) => b.balance - a.balance);
 
-  // add GPU count for convenience if you want
-  return filtered.map((h) => ({ ...h, gpus: Math.floor(h.balance / TOKENS_PER_GPU) }));
+  return entries.map((h) => ({ ...h, gpus: Math.floor(h.balance / TOKENS_PER_GPU) }));
 }
 
+// ---- epoch info (same as before) ----
 async function getEpochCountdown() {
   let info: any;
   try {
@@ -156,12 +148,20 @@ export default async function handler() {
       getBalanceSOL(EPOCH_REWARDS_WALLET),
       getEpochCountdown(),
     ]);
-    const payload = { updatedAt: new Date().toISOString(), holders, gpuRewardsSol, epochRewardsSol, epoch };
+
+    const payload = {
+      updatedAt: new Date().toISOString(),
+      holders,
+      gpuRewardsSol,
+      epochRewardsSol,
+      epoch,
+    };
+
     return new Response(JSON.stringify(payload), {
       status: 200,
       headers: {
         "content-type": "application/json; charset=utf-8",
-        // CDN cache: one fresh render per ~30s per edge region
+        // one fresh compute every ~30s per edge region; browsers use this cached JSON
         "Cache-Control": "public, max-age=0, s-maxage=30, stale-while-revalidate=30",
       },
     });
