@@ -9,10 +9,10 @@ const GRID = "#1f232a";
 
 // ========================= PROTOCOL CONSTANTS =========================
 const TOKENS_PER_GPU = 1_000_000;
-const TRACKED_MINT = "";
+const TRACKED_MINT = "8GftvtSGMyk15hJFfc9bESxhVbPJtLGdT4ztyGZapump";
 
 // ========================= EXCLUSIONS =========================
-export const PUMPFUN_AMM_WALLET = "2WRdVS3tTha4ZxiC2YhQSqgw3zP5WHEhZ7Vbuf4hDze1"; // replace on deploy
+export const PUMPFUN_AMM_WALLET = "pvJzn1Xpbfsu6e7gaSnVGPZAwLRP9dLAjSxrzbGtUAU"; // replace on deploy
 const EXCLUDED_HOLDERS = new Set<string>([PUMPFUN_AMM_WALLET]);
 export const isExcludedHolder = (addr: string) => EXCLUDED_HOLDERS.has(addr);
 
